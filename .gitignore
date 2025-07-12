@@ -1,0 +1,7 @@
+dashboard/node_modules
+dashboard/dist
+dashboard/build
+dashboard/dist
+
+glasses/node_modules
+glasses/bun.lockb
