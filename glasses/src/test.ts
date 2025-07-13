@@ -2,7 +2,7 @@ import { NutritionFactsEstimator } from './NutritionFactsEstimator';
 
 async function main() {
   const estimator = new NutritionFactsEstimator();
-  const imageUrl = 'https://upload.wikimedia.org/wikipedia/commons/thumb/4/4d/Cheeseburger.jpg/500px-Cheeseburger.jpg';
+  const imageUrl = 'https://p70oi85l49.ufs.sh/f/nh2RhlWG3N8Jj3KsfdErZlYx9hSuCXatgqW8zNb12eOVndk0';
 
   try {
     const result = await estimator.processImageUrl(imageUrl);

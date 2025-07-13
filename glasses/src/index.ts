@@ -2,6 +2,8 @@ import { AppServer, AppSession, ViewType, AuthenticatedRequest, PhotoData } from
 import { Request, Response } from 'express';
 import * as ejs from 'ejs';
 import * as path from 'path';
+import { uploadthingHandler } from './uploadthing-express';
+import { uploadPhotoBufferToUploadThing } from './uploadthing-util';
 
 /**
  * Interface representing a stored photo with metadata
@@ -163,6 +165,19 @@ class ExampleMentraOSApp extends AppServer {
     // update the latest photo timestamp
     this.latestPhotoTimestamp.set(userId, cachedPhoto.timestamp.getTime());
 
+    // Upload to UploadThing
+    try {
+      const uploadResult = await uploadPhotoBufferToUploadThing(
+        photo.buffer,
+        photo.filename,
+        photo.mimeType,
+        photo.requestId // use requestId as customId
+      );
+      this.logger.info(`Photo uploaded to UploadThing for user ${userId}: ${JSON.stringify(uploadResult)}`);
+    } catch (err) {
+      this.logger.error(`Error uploading photo to UploadThing: ${err}`);
+    }
+
     // Send the photo to Discord webhook asynchronously (non-blocking)
     this.sendToDiscord(cachedPhoto).catch(error => {
       this.logger.error(`Error sending photo to Discord: ${error}`);
@@ -222,6 +237,9 @@ class ExampleMentraOSApp extends AppServer {
  */
   private setupWebviewRoutes(): void {
     const app = this.getExpressApp();
+
+    // Mount UploadThing handler
+    app.use('/api/uploadthing', uploadthingHandler);
 
     // API endpoint to get the latest photo for the authenticated user
     app.get('/api/latest-photo', (req: any, res: any) => {
