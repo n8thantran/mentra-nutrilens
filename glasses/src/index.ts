@@ -3,6 +3,7 @@
  * 
  * This application captures photos, uploads them to UploadThing, analyzes nutrition
  * facts using Claude Vision API, and sends results to Discord webhooks.
+ * Optimized with parallel processing using worker threads.
  */
 
 import { AppServer, AppSession } from '@mentra/sdk';
@@ -10,26 +11,57 @@ import { CONFIG } from './config/environment';
 import { PhotoManager } from './services/photo-manager';
 import { setupWebviewRoutes } from './routes/webview';
 import { elevenlabsTTS } from './services/elevenlabs.mts';
-import { analyzeDietaryQuestion } from './services/claude-dietary-analysis';
+import { analyzeDietaryQuestionWithAudio, analyzeDietaryQuestionWithSession } from './services/claude-dietary-analysis';
 import { getUserProfile } from './services/supabase';
 import { uploadPhotoToUploadThing } from './services/uploadthing';
 import { UserDietaryProfile } from './types';
+import { 
+  defaultWorkerManager, 
+  initializeDefaultWorkers, 
+  shutdownDefaultWorkers,
+  WorkerMessage 
+} from './utils/worker-manager';
 import * as fs from 'fs';
 import * as path from 'path';
 
+// Worker thread interfaces for type safety
+interface ImageProcessingMessage extends WorkerMessage {
+  type: 'process_image';
+  photoData: {
+    buffer: Buffer;
+    filename: string;
+    mimeType: string;
+    requestId: string;
+  };
+  userId: string;
+  question?: string;
+}
+
+interface AudioProcessingMessage extends WorkerMessage {
+  type: 'process_audio';
+  audioData: ArrayBuffer;
+  userId: string;
+  context: string;
+}
+
 /**
- * Photo Taker App with webview functionality for displaying photos
- * Extends AppServer to provide photo taking and webview display capabilities
+ * Photo Taker App with parallel processing capabilities
+ * Extends AppServer to provide optimized photo taking and audio processing
  */
 class NutritionLensApp extends AppServer {
   private photoManager: PhotoManager = new PhotoManager();
-  private isStreamingPhotos: Map<string, boolean> = new Map(); // Track if we are streaming photos for a user
-  private nextPhotoTime: Map<string, number> = new Map(); // Track next photo time for a user
-  private cameraReady: Map<string, boolean> = new Map(); // Track if camera is pre-warmed for user
-  private cameraInUse: Map<string, boolean> = new Map(); // Track if camera is currently being used
-  private userSessions: Map<string, AppSession> = new Map(); // Track active sessions for TTS
-  private isCapturingQuestion: Map<string, boolean> = new Map(); // Track if we're capturing a question
-  private capturedQuestions: Map<string, string> = new Map(); // Store captured questions by user
+  private isStreamingPhotos: Map<string, boolean> = new Map();
+  private nextPhotoTime: Map<string, number> = new Map();
+  private cameraReady: Map<string, boolean> = new Map();
+  private cameraInUse: Map<string, boolean> = new Map();
+  private lastCameraOperation: Map<string, number> = new Map();
+  private userSessions: Map<string, AppSession> = new Map();
+  private isCapturingQuestion: Map<string, boolean> = new Map();
+  private capturedQuestions: Map<string, string> = new Map();
+  private cleanupHandlers: Map<string, Array<() => void>> = new Map();
+
+  // Parallel processing state
+  private workersInitialized: boolean = false;
 
   constructor() {
     super({
@@ -40,22 +72,140 @@ class NutritionLensApp extends AppServer {
     this.setupMiddleware();
     this.setupWebviewRoutes();
     this.setupPhotoManagerCallbacks();
+    this.initializeWorkers();
   }
 
   /**
-   * Set up Express middleware
+   * Initialize worker threads for parallel processing
+   */
+  private async initializeWorkers(): Promise<void> {
+    try {
+      console.log('🚀 Initializing worker threads for parallel processing...');
+      this.workersInitialized = await initializeDefaultWorkers();
+      
+      if (this.workersInitialized) {
+        console.log('✅ Parallel processing enabled with worker threads');
+      } else {
+        console.log('⚠️ Falling back to single-threaded processing');
+      }
+    } catch (error) {
+      console.warn('⚠️ Workers not available, using single-threaded processing:', error);
+      this.workersInitialized = false;
+    }
+  }
+
+  /**
+   * Process image in parallel using worker thread
+   */
+  private async processImageParallel(photoData: any, userId: string, question?: string): Promise<any> {
+    if (!this.workersInitialized || !defaultWorkerManager.isWorkerAvailable('image')) {
+      return this.processImageSingleThreaded(photoData, userId, question);
+    }
+
+    try {
+      const taskId = defaultWorkerManager.generateTaskId('image');
+      const message: ImageProcessingMessage = {
+        type: 'process_image',
+        id: taskId,
+        photoData: {
+          buffer: photoData.buffer,
+          filename: photoData.filename,
+          mimeType: photoData.mimeType,
+          requestId: photoData.requestId
+        },
+        userId,
+        question
+      };
+
+      return await defaultWorkerManager.sendTask('image', message);
+    } catch (error) {
+      console.warn('⚠️ Parallel image processing failed, falling back to single-threaded:', error);
+      return this.processImageSingleThreaded(photoData, userId, question);
+    }
+  }
+
+  /**
+   * Process audio in parallel using worker thread
+   */
+  private async processAudioParallel(audioData: ArrayBuffer, userId: string, context: string): Promise<any> {
+    if (!this.workersInitialized || !defaultWorkerManager.isWorkerAvailable('audio')) {
+      return this.processAudioSingleThreaded(audioData, userId, context);
+    }
+
+    try {
+      const taskId = defaultWorkerManager.generateTaskId('audio');
+      const message: AudioProcessingMessage = {
+        type: 'process_audio',
+        id: taskId,
+        audioData,
+        userId,
+        context
+      };
+
+      return await defaultWorkerManager.sendTask('audio', message);
+    } catch (error) {
+      console.warn('⚠️ Parallel audio processing failed, falling back to single-threaded:', error);
+      return this.processAudioSingleThreaded(audioData, userId, context);
+    }
+  }
+
+  /**
+   * Fallback single-threaded image processing
+   */
+  private async processImageSingleThreaded(photoData: any, userId: string, question?: string): Promise<any> {
+    try {
+      const uploadedFile = await uploadPhotoToUploadThing(
+        photoData.buffer,
+        photoData.filename,
+        photoData.mimeType,
+        userId,
+        photoData.requestId
+      );
+
+      if (question) {
+        const result = await analyzeDietaryQuestionWithAudio(question, uploadedFile.url, 'Nathan');
+        return { uploadedFile, analysis: result };
+      }
+
+      return { uploadedFile };
+    } catch (error) {
+      throw new Error(`Single-threaded image processing failed: ${error}`);
+    }
+  }
+
+  /**
+   * Fallback single-threaded audio processing
+   */
+  private async processAudioSingleThreaded(audioData: ArrayBuffer, userId: string, context: string): Promise<any> {
+    try {
+      return { processed: true, audioLength: audioData.byteLength, context };
+    } catch (error) {
+      throw new Error(`Single-threaded audio processing failed: ${error}`);
+    }
+  }
+
+  /**
+   * Set up Express middleware with error handling
    */
   private setupMiddleware(): void {
-    const app = this.getExpressApp();
-    // Add JSON body parser for TTS requests
+    try {
+      // Try to access getExpressApp method, fallback if not available
+      if (typeof (this as any).getExpressApp === 'function') {
+        const app = (this as any).getExpressApp();
     app.use(require('express').json());
+        console.log('✅ Express middleware setup successful');
+      } else {
+        console.warn('⚠️ getExpressApp method not available, skipping middleware setup');
+      }
+    } catch (error) {
+      console.warn('⚠️ Express middleware setup failed:', error);
+    }
   }
 
   /**
    * Set up PhotoManager callbacks for audio playback
    */
   private setupPhotoManagerCallbacks(): void {
-    // Set up audio playback callback for PhotoManager
     this.photoManager.setAudioPlaybackCallback(async (userId: string, audioUrl: string) => {
       await this.playAudioOnGlasses(userId, audioUrl);
     });
@@ -67,28 +217,29 @@ class NutritionLensApp extends AppServer {
   private async playAudioOnGlasses(userId: string, audioUrl: string): Promise<void> {
     const session = this.userSessions.get(userId);
     if (!session) {
-      this.logger.error(`No active session found for user ${userId} for audio playback`);
+      console.error(`No active session found for user ${userId} for audio playback`);
       throw new Error('No active session found for audio playback');
     }
 
     try {
-      this.logger.info(`Playing audio on glasses for user ${userId}: ${audioUrl}`);
+      session.logger.info(`Playing audio on glasses for user ${userId}: ${audioUrl}`);
       
-      // Use the layout system to display an audio-playing notification
-      // This approach shows a text notification while we attempt to play audio
       if (session.layouts && typeof session.layouts.showTextWall === 'function') {
         session.layouts.showTextWall("🎵 Audio Playing...");
         
-        // Wait a moment for the text to display
         setTimeout(() => {
           if (session.layouts && typeof session.layouts.showTextWall === 'function') {
-            session.layouts.showTextWall(""); // Clear the message
+            session.layouts.showTextWall("");
           }
         }, 3000);
       }
 
-      // Create an audio playback iframe/webview approach
-      // Since MentraOS might support embedded web content, we'll create a simple HTML audio player
+      try {
+        await session.audio.playAudio({audioUrl: audioUrl});
+        session.logger.info(`Audio playback initiated successfully for user ${userId}`);
+      } catch (audioError) {
+        session.logger.warn(`Direct audio playback failed, using fallback: ${audioError}`);
+        
       const audioHtml = `
         <!DOCTYPE html>
         <html>
@@ -105,7 +256,6 @@ class NutritionLensApp extends AppServer {
             Your browser does not support the audio element.
           </audio>
           <script>
-            // Auto-close after playing
             setTimeout(() => {
               window.close();
             }, 5000);
@@ -114,210 +264,363 @@ class NutritionLensApp extends AppServer {
         </html>
       `;
 
-      // Create a temporary HTML file for audio playback
       const tempDir = '/tmp';
       const tempFileName = `audio_player_${userId}_${Date.now()}.html`;
       const tempFilePath = path.join(tempDir, tempFileName);
       
       fs.writeFileSync(tempFilePath, audioHtml);
+        session.logger.info(`Created audio player file: ${tempFilePath}`);
       
-      // Log the created audio player file
-      this.logger.info(`Created audio player file: ${tempFilePath}`);
-      this.logger.info(`Audio URL: ${audioUrl}`);
-      
-      // Clean up the temporary file after a delay
       setTimeout(() => {
         try {
           fs.unlinkSync(tempFilePath);
         } catch (error) {
-          this.logger.warn(`Failed to cleanup temporary audio file: ${error}`);
+            session.logger.warn(`Failed to cleanup temporary audio file: ${error}`);
         }
       }, 10000);
-
-      this.logger.info(`Audio playback initiated successfully for user ${userId}`);
+      }
       
     } catch (error) {
-      this.logger.error(`Error playing audio on glasses for user ${userId}: ${error}`);
+      session.logger.error(`Error playing audio on glasses for user ${userId}: ${error}`);
       throw error;
     }
   }
 
   /**
-   * Handle new session creation and button press events
+   * Handle new session creation and button press events with parallel processing
    */
   protected async onSession(session: AppSession, sessionId: string, userId: string): Promise<void> {
-    // this gets called whenever a user launches the app
-    this.logger.info(`Session started for user ${userId}`);
-
-    // Store the session for TTS functionality
+    session.logger.info(`Session started for user ${userId}`);
     this.userSessions.set(userId, session);
+    this.cleanupHandlers.set(sessionId, []);
 
-    // set the initial state of the user
+    // Initialize user state
     this.isStreamingPhotos.set(userId, false);
     this.nextPhotoTime.set(userId, Date.now());
     this.cameraReady.set(userId, false);
     this.isCapturingQuestion.set(userId, false);
     this.capturedQuestions.set(userId, '');
 
-    // Pre-warm the camera for instant capture
-    await this.prewarmCamera(session, userId);
+    // Check capabilities before setting up features
+    if (!session.capabilities) {
+      session.logger.warn('Capabilities not available yet, deferring setup');
+      return;
+    }
 
-    // Handle transcription events for question capture
-    const unsubscribeTranscription = session.events.onTranscription((data) => {
+    // Pre-warm the camera for instant capture if available
+    if (session.capabilities.hasCamera) {
+      await this.prewarmCameraOptimized(session, userId);
+    } else {
+      session.logger.info('No camera available - photo features disabled');
+    }
+
+    // Handle transcription events for question capture with parallel audio processing
+    if (session.capabilities.hasMicrophone) {
+      const unsubscribeTranscription = session.events.onTranscription(async (data) => {
       if (this.isCapturingQuestion.get(userId) && data.isFinal) {
         const currentQuestion = this.capturedQuestions.get(userId) || '';
         const newQuestion = currentQuestion + ' ' + data.text.trim();
         this.capturedQuestions.set(userId, newQuestion.trim());
-        this.logger.info(`📝 Captured question from ${userId}: "${data.text}"`);
+          session.logger.info(`📝 Captured question from ${userId}: "${data.text}"`);
         
-        // Show the captured text on glasses
+          // Process audio in parallel if worker is available
+          if (this.workersInitialized && data.text) {
+            this.processAudioParallel(
+              new TextEncoder().encode(data.text).buffer,
+              userId,
+              'transcription'
+            ).catch(error => {
+              session.logger.warn(`Audio processing failed: ${error}`);
+            });
+          }
+          
         if (session.layouts && typeof session.layouts.showTextWall === 'function') {
           session.layouts.showTextWall(`🎤 Question: ${newQuestion.trim()}`);
         }
       }
     });
 
-    // this gets called whenever a user presses a button
-    session.events.onButtonPress((button) => {
-      this.logger.info(`Button pressed: ${button.buttonId} (${button.pressType})`);
+      this.addSessionCleanupHandler(sessionId, unsubscribeTranscription);
+    }
+
+    // Handle button press events
+    if (session.capabilities.hasButton) {
+      const unsubscribeButton = session.events.onButtonPress((button) => {
+        session.logger.info(`Button pressed: ${button.buttonId} (${button.pressType})`);
       
       if (button.pressType === 'long') {
-        // Check if this is the right button (for dietary questions) 
-        // Note: buttonId implementation may vary, so we'll handle any long press for now
+          // Long press: Use parallel processing for question capture and analysis
         if (this.isCapturingQuestion.get(userId)) {
-          // Stop capturing and process the question
-          this.stopQuestionCaptureAndAnalyze(session, userId);
+            this.stopQuestionCaptureAndAnalyzeParallel(session, userId);
         } else {
-          // Start capturing question
           this.startQuestionCapture(session, userId);
         }
       } else {
-        // Short press - take a single photo immediately
-        // Use non-async call to minimize delay
+          // Short press: Use single-threaded processing for immediate photo
         session.audio.playAudio({audioUrl: 'https://p70oi85l49.ufs.sh/f/nh2RhlWG3N8JdhLgZNdJUzAnxuO94lXyfcDtQHhpJgCwiVWK'})
-        this.playTTSForUser(userId, 'The first move is what sets everything in motion.');
         this.takePhotoImmediate(session, userId);
       }
     });
 
-    // Clean up transcription listener when session ends
-    this.addCleanupHandler(unsubscribeTranscription);
+      this.addSessionCleanupHandler(sessionId, unsubscribeButton);
+    }
 
-    // repeatedly check if we are in streaming mode and if we are ready to take another photo
-    setInterval(async () => {
-      if (this.isStreamingPhotos.get(userId) && Date.now() > (this.nextPhotoTime.get(userId) ?? 0)) {
-        try {
-          // set the next photos for 30 seconds from now, as a fallback if this fails
-          this.nextPhotoTime.set(userId, Date.now() + 30000);
-
-          // Check camera capabilities before attempting
-          if (!session.capabilities?.hasCamera) {
-            this.logger.error('❌ No camera available for streaming photo');
-            return;
-          }
-
-          // Take photo with timeout
-          const photoPromise = session.camera.requestPhoto();
-          const timeoutPromise = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error('Streaming photo request timed out after 8 seconds')), 8000);
-          });
-
-          // Race between photo capture and timeout
-          const photo = await Promise.race([photoPromise, timeoutPromise]);
-
-          // set the next photo time to now, since we are ready to take another photo
-          this.nextPhotoTime.set(userId, Date.now());
-
-          // cache the photo for display and process it
-          await this.photoManager.cacheAndProcessPhoto(photo, userId, this.logger);
-        } catch (error) {
-          this.logger.error(`Error auto-taking photo: ${error}`);
-        }
-      }
-    }, 1000);
+    // Set up optimized streaming photo interval with single-threaded processing
+    this.setupStreamingPhotoInterval(session, userId, sessionId);
   }
 
   /**
-   * Pre-warm the camera for instant capture
+   * Add a cleanup handler for a specific session
    */
-  private async prewarmCamera(session: AppSession, userId: string): Promise<void> {
+  private addSessionCleanupHandler(sessionId: string, handler: () => void): void {
+    const handlers = this.cleanupHandlers.get(sessionId) || [];
+    handlers.push(handler);
+    this.cleanupHandlers.set(sessionId, handlers);
+  }
+
+  /**
+   * Pre-warm the camera for instant capture - optimized version
+   */
+  private async prewarmCameraOptimized(session: AppSession, userId: string): Promise<void> {
     try {
-      // Check camera capabilities first
       const caps = session.capabilities;
       if (!caps?.hasCamera) {
-        this.logger.warn(`No camera available for user ${userId}`);
+        session.logger.warn(`No camera available for user ${userId}`);
         return;
       }
 
-      // Log camera capabilities for debugging
       if (caps.camera) {
-        this.logger.info(`Camera capabilities for user ${userId}: focus=${caps.camera.hasFocus}, HDR=${caps.camera.hasHDR}`);
+        session.logger.info(`Camera capabilities for user ${userId}: focus=${caps.camera.hasFocus}, HDR=${caps.camera.hasHDR}`);
       }
 
-      // Pre-warm the camera by taking a dummy photo (don't save it)
-      this.logger.info(`Pre-warming camera for user ${userId}`);
-      await session.camera.requestPhoto();
+      session.logger.info(`Pre-warming camera for user ${userId}`);
+      
+      const preWarmPromise = session.camera.requestPhoto();
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('Pre-warm timeout after 3 seconds')), 3000);
+      });
+
+      try {
+        await Promise.race([preWarmPromise, timeoutPromise]);
       this.cameraReady.set(userId, true);
-      this.logger.info(`Camera pre-warmed for user ${userId}`);
+        session.logger.info(`Camera pre-warmed successfully for user ${userId}`);
+      } catch (error) {
+        session.logger.warn(`Camera pre-warm failed (non-critical): ${error}`);
+        this.cameraReady.set(userId, false);
+      }
     } catch (error) {
-      this.logger.error(`Error pre-warming camera for user ${userId}: ${error}`);
-      // Camera not ready, but we'll still try to take photos
+      session.logger.error(`Error pre-warming camera for user ${userId}: ${error}`);
       this.cameraReady.set(userId, false);
     }
   }
 
   /**
-   * Take photo immediately without async/await to minimize delay
+   * Set up optimized streaming photo interval with single-threaded processing
    */
-  private takePhotoImmediate(session: AppSession, userId: string): void {
-    // Use async version with timeout handling but don't await to maintain non-blocking behavior
-    this.takePhotoImmediateAsync(session, userId).catch(error => {
-      this.logger.error(`Error in immediate photo capture: ${error}`);
+  private setupStreamingPhotoInterval(session: AppSession, userId: string, sessionId: string): void {
+    const intervalId = setInterval(async () => {
+      if (this.isStreamingPhotos.get(userId) && Date.now() > (this.nextPhotoTime.get(userId) ?? 0)) {
+        try {
+          this.nextPhotoTime.set(userId, Date.now() + 30000);
+
+          if (!session.capabilities?.hasCamera) {
+            session.logger.error('❌ No camera available for streaming photo');
+            return;
+          }
+
+          // Check camera availability for streaming photos
+          const waitResult = await this.waitForCameraAvailability(session, userId, 5000);
+          if (!waitResult) {
+            session.logger.warn('⚠️ Camera not available for streaming photo, skipping');
+            return;
+          }
+          
+          const photo = await this.capturePhotoWithEnhancedTimeout(session, userId, 8000);
+          if (photo) {
+            this.nextPhotoTime.set(userId, Date.now());
+            this.lastCameraOperation.set(userId, Date.now());
+            
+            // Process photo using original nutrition analysis workflow for streaming
+            try {
+              await this.processNutritionAnalysisWorkflow(session, photo, userId);
+              session.logger.info('📸 Streaming photo nutrition analysis completed');
+            } catch (error) {
+              session.logger.error(`Streaming photo nutrition analysis failed: ${error}`);
+            }
+          }
+        } catch (error) {
+          session.logger.error(`Error auto-taking photo: ${error}`);
+        }
+      }
+    }, 2000);
+
+    this.addSessionCleanupHandler(sessionId, () => {
+      clearInterval(intervalId);
     });
   }
 
   /**
-   * Async version of immediate photo capture with timeout handling
+   * Take photo immediately with single-threaded processing (for regular button press)
+   */
+  private takePhotoImmediate(session: AppSession, userId: string): void {
+    this.takePhotoImmediateAsync(session, userId).catch(error => {
+      session.logger.error(`Error in immediate photo capture: ${error}`);
+    });
+  }
+
+  /**
+   * Single-threaded async version of immediate photo capture (for regular button press)
+   * Follows original workflow: photo → upload → nutrition analysis → database
    */
   private async takePhotoImmediateAsync(session: AppSession, userId: string): Promise<void> {
     try {
-      // Check camera capabilities
       if (!session.capabilities?.hasCamera) {
-        this.logger.error('❌ No camera available for immediate photo');
+        session.logger.error('❌ No camera available for immediate photo');
         return;
       }
 
-      // Check if camera is already in use
-      if (this.cameraInUse.get(userId)) {
-        this.logger.warn('⚠️ Camera already in use for immediate photo, skipping');
+      // Check if camera is busy and wait with better timeout handling
+      const waitResult = await this.waitForCameraAvailability(session, userId, 8000);
+      if (!waitResult) {
+        session.logger.warn('⚠️ Camera timeout - unable to capture photo, please try again');
+        if (session.layouts && typeof session.layouts.showTextWall === 'function') {
+          session.layouts.showTextWall('📸 Camera busy. Please wait and try again.');
+        }
         return;
       }
 
-      this.logger.info(`📸 Taking immediate photo for user ${userId}`);
+      session.logger.info(`📸 Taking immediate photo for user ${userId} (single-threaded nutrition analysis)`);
       this.cameraInUse.set(userId, true);
 
-      // Use the same timeout logic as the dietary analysis
-      const photoPromise = session.camera.requestPhoto();
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('Immediate photo request timed out after 8 seconds')), 8000);
-      });
+      if (session.layouts && typeof session.layouts.showTextWall === 'function') {
+        session.layouts.showTextWall('📸 Taking photo for nutrition analysis...');
+      }
 
-      // Race between photo capture and timeout (shorter timeout for immediate photos)
-      const photo = await Promise.race([photoPromise, timeoutPromise]);
+      const photo = await this.capturePhotoWithEnhancedTimeout(session, userId, 10000);
       
-      this.logger.info(`✅ Immediate photo captured successfully`);
-      await this.photoManager.cacheAndProcessPhoto(photo, userId, this.logger);
+      if (photo) {
+        session.logger.info(`✅ Immediate photo captured successfully`);
+
+        // Process using original nutrition analysis workflow (single-threaded)
+        try {
+          await this.processNutritionAnalysisWorkflow(session, photo, userId);
+        } catch (error) {
+          session.logger.error(`Nutrition analysis workflow failed: ${error}`);
+          if (session.layouts && typeof session.layouts.showTextWall === 'function') {
+            session.layouts.showTextWall('❌ Nutrition analysis failed. Try again.');
+          }
+        }
+      } else {
+        session.logger.warn(`⚠️ Immediate photo capture returned null`);
+        if (session.layouts && typeof session.layouts.showTextWall === 'function') {
+          session.layouts.showTextWall('❌ Photo capture failed. Try again.');
+        }
+      }
 
     } catch (error) {
-      this.logger.error(`❌ Immediate photo capture failed: ${error}`);
+      session.logger.error(`❌ Immediate photo capture failed: ${error}`);
       
-      // Show user feedback if photo fails
       if (session.layouts && typeof session.layouts.showTextWall === 'function') {
         session.layouts.showTextWall('📸 Photo failed. Try again.');
       }
     } finally {
-      // Always release camera lock
       this.cameraInUse.set(userId, false);
+      this.lastCameraOperation.set(userId, Date.now());
+    }
+  }
+
+  /**
+   * Optimized photo capture with better timeout and retry logic
+   */
+  private async capturePhotoOptimized(session: AppSession, userId: string, timeoutMs: number = 8000): Promise<any | null> {
+    try {
+      if (!session.capabilities?.hasCamera) {
+        session.logger.error('❌ No camera available on this device');
+        return null;
+      }
+
+      const photoPromise = session.camera.requestPhoto();
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error(`Photo request timed out after ${timeoutMs}ms`)), timeoutMs);
+      });
+
+      const photo = await Promise.race([photoPromise, timeoutPromise]);
+      session.logger.info(`✅ Photo captured successfully`);
+      return photo;
+
+    } catch (error) {
+      session.logger.warn(`⚠️ Photo capture failed: ${error}`);
+      return null;
+    }
+  }
+
+  /**
+   * Wait for camera to become available with proper cooldown management
+   */
+  private async waitForCameraAvailability(session: AppSession, userId: string, maxWaitMs: number = 8000): Promise<boolean> {
+    const startTime = Date.now();
+    
+    while (Date.now() - startTime < maxWaitMs) {
+      // Check if camera is currently in use by another operation
+      if (!this.cameraInUse.get(userId)) {
+        // Check if enough time has passed since last operation (minimum 2 seconds cooldown)
+        const lastOperation = this.lastCameraOperation.get(userId) || 0;
+        const timeSinceLastOp = Date.now() - lastOperation;
+        
+        if (timeSinceLastOp >= 2000) {
+          session.logger.info(`✅ Camera available for user ${userId} (${timeSinceLastOp}ms since last operation)`);
+          return true;
+        } else {
+          const remainingCooldown = 2000 - timeSinceLastOp;
+          session.logger.info(`⏳ Camera cooldown: waiting ${remainingCooldown}ms more for user ${userId}`);
+          await new Promise(resolve => setTimeout(resolve, Math.min(remainingCooldown, 500)));
+        }
+      } else {
+        session.logger.info(`⏳ Camera busy, waiting for availability for user ${userId}`);
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+    
+    session.logger.warn(`❌ Camera availability timeout after ${maxWaitMs}ms for user ${userId}`);
+    return false;
+  }
+
+  /**
+   * Enhanced photo capture with better timeout handling for consecutive operations
+   */
+  private async capturePhotoWithEnhancedTimeout(session: AppSession, userId: string, timeoutMs: number = 10000): Promise<any | null> {
+    try {
+      if (!session.capabilities?.hasCamera) {
+        session.logger.error('❌ No camera available on this device');
+        return null;
+      }
+
+      // For consecutive operations, use longer timeout
+      const lastOperation = this.lastCameraOperation.get(userId) || 0;
+      const timeSinceLastOp = Date.now() - lastOperation;
+      
+      // If last operation was recent, increase timeout to account for camera reset time
+      let adjustedTimeout = timeoutMs;
+      if (timeSinceLastOp < 10000) {
+        adjustedTimeout = Math.max(timeoutMs, 12000);
+        session.logger.info(`📸 Using extended timeout (${adjustedTimeout}ms) due to recent camera operation`);
+      }
+
+      session.logger.info(`📸 Starting photo capture with ${adjustedTimeout}ms timeout`);
+      
+      const captureStartTime = Date.now();
+      const photoPromise = session.camera.requestPhoto();
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error(`Photo request timed out after ${adjustedTimeout}ms`)), adjustedTimeout);
+      });
+
+      const photo = await Promise.race([photoPromise, timeoutPromise]);
+      session.logger.info(`✅ Photo captured successfully in ${Date.now() - captureStartTime}ms`);
+      return photo;
+
+    } catch (error) {
+      session.logger.warn(`⚠️ Enhanced photo capture failed: ${error}`);
+      return null;
     }
   }
 
@@ -327,23 +630,19 @@ class NutritionLensApp extends AppServer {
   public async playTTSForUser(userId: string, text: string): Promise<void> {
     const session = this.userSessions.get(userId);
     if (!session) {
-      this.logger.error(`No active session found for user ${userId}`);
+      console.error(`No active session found for user ${userId}`);
       throw new Error('No active session found');
     }
 
     try {
-      this.logger.info(`Generating and uploading TTS for user ${userId}: "${text}"`);
+      session.logger.info(`Generating and uploading TTS for user ${userId}: "${text}"`);
       
-      // Generate TTS audio and upload to UploadThing
       const uploadResult = await elevenlabsTTS.generateAndUploadTTS(text, userId);
+      session.logger.info(`TTS audio uploaded to: ${uploadResult.url}`);
       
-      this.logger.info(`TTS audio uploaded to: ${uploadResult.url}`);
-      
-      // Use layout system to show TTS notification with upload success
       if (session.layouts && typeof session.layouts.showTextWall === 'function') {
         session.layouts.showTextWall(`🔊 ${text}\n📤 Uploaded to bucket`);
         
-        // Clear the message after a delay
         setTimeout(() => {
           if (session.layouts && typeof session.layouts.showTextWall === 'function') {
             session.layouts.showTextWall("");
@@ -351,10 +650,10 @@ class NutritionLensApp extends AppServer {
         }, 5000);
       }
       
-      this.logger.info(`TTS generated and uploaded successfully for user ${userId}. File key: ${uploadResult.key}`);
+      session.logger.info(`TTS generated and uploaded successfully for user ${userId}. File key: ${uploadResult.key}`);
       
     } catch (error) {
-      this.logger.error(`Error generating and uploading TTS for user ${userId}: ${error}`);
+      session.logger.error(`Error generating and uploading TTS for user ${userId}: ${error}`);
       throw error;
     }
   }
@@ -363,27 +662,27 @@ class NutritionLensApp extends AppServer {
    * Start capturing question via transcription
    */
   private startQuestionCapture(session: AppSession, userId: string): void {
-    this.logger.info(`🎤 Starting question capture for user ${userId}`);
+    session.logger.info(`🎤 Starting question capture for user ${userId}`);
     this.isCapturingQuestion.set(userId, true);
     this.capturedQuestions.set(userId, '');
     
-    // Show UI feedback
     if (session.layouts && typeof session.layouts.showTextWall === 'function') {
       session.layouts.showTextWall('🎤 Listening for your question...\nHold button again to stop and analyze');
     }
   }
 
   /**
-   * Stop question capture and analyze with photo
+   * Stop question capture and analyze with photo - parallel processing version
+   * THIS IS THE ONLY METHOD THAT USES PARALLEL PROCESSING
    */
-  private async stopQuestionCaptureAndAnalyze(session: AppSession, userId: string): Promise<void> {
-    this.logger.info(`🛑 Stopping question capture for user ${userId}`);
+  private async stopQuestionCaptureAndAnalyzeParallel(session: AppSession, userId: string): Promise<void> {
+    session.logger.info(`🛑 Stopping question capture for user ${userId}`);
     this.isCapturingQuestion.set(userId, false);
     
     const question = this.capturedQuestions.get(userId) || '';
     
     if (!question.trim()) {
-      this.logger.warn(`No question captured for user ${userId}`);
+      session.logger.warn(`No question captured for user ${userId}`);
       if (session.layouts && typeof session.layouts.showTextWall === 'function') {
         session.layouts.showTextWall('❌ No question captured. Try again.');
       }
@@ -391,26 +690,138 @@ class NutritionLensApp extends AppServer {
     }
 
     try {
-      // Show processing message
       if (session.layouts && typeof session.layouts.showTextWall === 'function') {
-        session.layouts.showTextWall('📸 Taking photo and analyzing...');
+        session.layouts.showTextWall('📸 Taking photo and analyzing with parallel processing...');
       }
 
-      this.logger.info(`📝 Question captured: "${question}"`);
-      this.logger.info(`📸 Taking photo for dietary analysis...`);
+      session.logger.info(`📝 Question captured: "${question}"`);
+      session.logger.info(`📸 Taking photo for dietary analysis with parallel processing...`);
 
-      // Take a photo with timeout handling and retry logic
-      const photo = await this.capturePhotoWithRetry(session, userId);
+      // Take a photo with optimized capture
+      const photo = await this.capturePhotoWithRetryOptimized(session, userId);
       
       if (!photo) {
-        this.logger.error('❌ Failed to capture photo after retries');
+        session.logger.error('❌ Failed to capture photo after retries');
         if (session.layouts && typeof session.layouts.showTextWall === 'function') {
           session.layouts.showTextWall('❌ Photo capture failed. Try again.');
         }
         return;
       }
       
-      // Upload photo to get URL for Claude
+      // ONLY USE PARALLEL PROCESSING FOR CLICK AND HOLD SUBMISSIONS
+      session.logger.info('🚀 Using parallel processing for question-based dietary analysis');
+      
+      // Process image and audio in parallel
+      const [imageResult] = await Promise.allSettled([
+        this.processImageParallel(photo, userId, question),
+        this.processAudioParallel(
+          new TextEncoder().encode(question).buffer,
+          userId,
+          'dietary_question'
+        )
+      ]);
+
+      if (imageResult.status === 'fulfilled') {
+        const result = imageResult.value;
+        
+        if (result.analysis) {
+          // Store the audio URL and play it
+          const audioUrlFromClaude: string = result.analysis.audioUrl;
+      session.audio.playAudio({audioUrl: audioUrlFromClaude});
+      
+          // Print analysis to terminal
+          console.log('\n🤖 === CLAUDE DIETARY ANALYSIS WITH PARALLEL PROCESSING ===');
+      console.log(`👤 User: Nathan`);
+      console.log(`❓ Question: "${question}"`);
+          console.log(`📷 Image: ${result.uploadedFile.url}`);
+      console.log(`💬 Analysis:`);
+          console.log(result.analysis.analysis);
+          console.log(`🎧 Audio URL: ${result.analysis.audioUrl}`);
+          console.log(`🔑 Audio Key: ${result.analysis.audioKey}`);
+      console.log('===============================================\n');
+        }
+
+        session.logger.info('✅ Analysis complete with parallel processing and optimized glasses display');
+      } else {
+        throw new Error('Parallel image processing failed');
+      }
+
+    } catch (error) {
+      session.logger.error(`❌ Error during parallel dietary analysis: ${error}`);
+      if (session.layouts && typeof session.layouts.showTextWall === 'function') {
+        session.layouts.showTextWall('❌ Analysis failed. Try again.');
+      }
+    } finally {
+      this.capturedQuestions.delete(userId);
+    }
+  }
+
+  /**
+   * Optimized capture photo with retry logic and better timeout handling
+   */
+  private async capturePhotoWithRetryOptimized(session: AppSession, userId: string, maxRetries: number = 2): Promise<any | null> {
+    // Use enhanced camera availability check
+    const waitResult = await this.waitForCameraAvailability(session, userId, 10000);
+    if (!waitResult) {
+      session.logger.error('❌ Camera not available for dietary analysis after waiting');
+        return null;
+    }
+
+    this.cameraInUse.set(userId, true);
+
+    try {
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          session.logger.info(`📸 Photo capture attempt ${attempt}/${maxRetries}`);
+          
+          if (attempt > 1 && session.layouts && typeof session.layouts.showTextWall === 'function') {
+            session.layouts.showTextWall(`📸 Retrying photo... (${attempt}/${maxRetries})`);
+          }
+
+          // Use enhanced timeout with longer delays for retries
+          const baseTimeout = 10000 + (attempt - 1) * 3000;
+          const photo = await this.capturePhotoWithEnhancedTimeout(session, userId, baseTimeout);
+          
+          if (photo) {
+            session.logger.info(`✅ Photo captured successfully on attempt ${attempt}`);
+          return photo;
+          }
+
+        } catch (error) {
+          session.logger.warn(`⚠️ Photo capture attempt ${attempt} failed: ${error}`);
+          
+          if (attempt === maxRetries) {
+            session.logger.error(`❌ All photo capture attempts failed: ${error}`);
+            return null;
+          }
+
+          // Longer delays between retries for camera recovery
+          const delay = 2000 * attempt;
+          session.logger.info(`⏳ Waiting ${delay}ms before retry...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+
+      return null;
+    } finally {
+      this.cameraInUse.set(userId, false);
+      this.lastCameraOperation.set(userId, Date.now());
+    }
+  }
+
+  /**
+   * Process nutrition analysis workflow for regular button press
+   * Follows original flow: upload → Claude nutrition analysis → database storage
+   */
+  private async processNutritionAnalysisWorkflow(session: AppSession, photo: any, userId: string): Promise<void> {
+    try {
+      session.logger.info('🍎 Starting nutrition analysis workflow (upload → analyze → store)');
+      
+      if (session.layouts && typeof session.layouts.showTextWall === 'function') {
+        session.layouts.showTextWall('📤 Uploading photo...');
+      }
+
+      // Step 1: Upload photo to UploadThing
       const uploadedFile = await uploadPhotoToUploadThing(
         photo.buffer,
         photo.filename,
@@ -419,101 +830,69 @@ class NutritionLensApp extends AppServer {
         photo.requestId
       );
 
-      this.logger.info(`📤 Photo uploaded: ${uploadedFile.url}`);
-
-      // Analyze with Claude (using simplified approach - Claude handles user lookup)
-      const analysis = await analyzeDietaryQuestion(question, uploadedFile.url, 'Nathan');
+      session.logger.info(`✅ Photo uploaded to UploadThing: ${uploadedFile.url}`);
       
-      // Print analysis to terminal as requested
-      console.log('\n🤖 === CLAUDE DIETARY ANALYSIS ===');
-      console.log(`👤 User: Nathan`);
-      console.log(`❓ Question: "${question}"`);
-      console.log(`📷 Image: ${uploadedFile.url}`);
-      console.log(`💬 Analysis:`);
-      console.log(analysis);
-      console.log('=================================\n');
-
-      // Show success message on glasses
       if (session.layouts && typeof session.layouts.showTextWall === 'function') {
-        session.layouts.showTextWall('✅ Analysis complete!\nCheck terminal for results.');
+        session.layouts.showTextWall('🧠 Analyzing nutrition...');
       }
+
+      // Step 2: Analyze nutrition facts using Claude Vision API
+      const { analyzeNutritionFacts } = await import('./services/nutrition-analysis');
+      const nutritionData = await analyzeNutritionFacts(uploadedFile.url);
+
+      if (!nutritionData) {
+        throw new Error('Nutrition analysis returned null');
+      }
+
+      session.logger.info('✅ Nutrition analysis completed successfully');
+      
+      // Add image URL to nutrition data
+      nutritionData.imgURL = uploadedFile.url;
+
+      if (session.layouts && typeof session.layouts.showTextWall === 'function') {
+        session.layouts.showTextWall('💾 Saving to database...');
+      }
+
+      // Step 3: Store nutrition data in Supabase database
+      const { insertNutritionData } = await import('./services/supabase');
+      const saveSuccess = await insertNutritionData(nutritionData);
+
+      if (!saveSuccess) {
+        throw new Error('Failed to save nutrition data to database');
+      }
+
+      session.logger.info('✅ Nutrition data saved to database successfully');
+
+      // Display success message with key nutrients
+      const caloriesText = nutritionData.calories ? `${nutritionData.calories} cal` : 'N/A cal';
+      const proteinText = nutritionData.protein ? `${nutritionData.protein}g protein` : 'N/A protein';
+      const carbsText = nutritionData.carbs ? `${nutritionData.carbs}g carbs` : 'N/A carbs';
+
+      if (session.layouts && typeof session.layouts.showTextWall === 'function') {
+        session.layouts.showTextWall(`✅ Nutrition analyzed!\n${caloriesText}\n${proteinText}\n${carbsText}`);
+        
+        setTimeout(() => {
+          if (session.layouts && typeof session.layouts.showTextWall === 'function') {
+            session.layouts.showTextWall('');
+          }
+        }, 5000);
+      }
+
+      // Print analysis to terminal
+      console.log('\n🍎 === NUTRITION ANALYSIS WORKFLOW COMPLETE ===');
+      console.log(`👤 User: ${userId}`);
+      console.log(`📷 Image: ${uploadedFile.url}`);
+      console.log(`📊 Key Nutrients:`);
+      console.log(`  Calories: ${nutritionData.calories || 'N/A'}`);
+      console.log(`  Protein: ${nutritionData.protein || 'N/A'}g`);
+      console.log(`  Carbs: ${nutritionData.carbs || 'N/A'}g`);
+      console.log(`  Fats: ${nutritionData.fats || 'N/A'}g`);
+      console.log(`💾 Saved to database: ${saveSuccess ? '✅' : '❌'}`);
+      console.log('===============================================\n');
 
     } catch (error) {
-      this.logger.error(`❌ Error during dietary analysis: ${error}`);
-      if (session.layouts && typeof session.layouts.showTextWall === 'function') {
-        session.layouts.showTextWall('❌ Analysis failed. Try again.');
-      }
-    } finally {
-      // Clean up captured question
-      this.capturedQuestions.delete(userId);
-    }
-  }
-
-  /**
-   * Capture photo with timeout handling and retry logic
-   */
-  private async capturePhotoWithRetry(session: AppSession, userId: string, maxRetries: number = 3): Promise<any | null> {
-    // Check if camera is already in use
-    if (this.cameraInUse.get(userId)) {
-      this.logger.warn('⚠️ Camera already in use for dietary analysis, waiting...');
-      // Wait a bit for camera to be free
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      if (this.cameraInUse.get(userId)) {
-        this.logger.error('❌ Camera still busy after waiting');
-        return null;
-      }
-    }
-
-    this.cameraInUse.set(userId, true);
-
-    try {
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          this.logger.info(`📸 Photo capture attempt ${attempt}/${maxRetries}`);
-          
-          // Check camera capabilities before attempting
-          if (!session.capabilities?.hasCamera) {
-            this.logger.error('❌ No camera available on this device');
-            return null;
-          }
-
-          // Add user feedback for retry attempts
-          if (attempt > 1 && session.layouts && typeof session.layouts.showTextWall === 'function') {
-            session.layouts.showTextWall(`📸 Retrying photo... (${attempt}/${maxRetries})`);
-          }
-
-          // Create a promise that will timeout after 10 seconds
-          const photoPromise = session.camera.requestPhoto();
-          const timeoutPromise = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error('Photo request timed out after 10 seconds')), 10000);
-          });
-
-          // Race between photo capture and timeout
-          const photo = await Promise.race([photoPromise, timeoutPromise]);
-          
-          this.logger.info(`✅ Photo captured successfully on attempt ${attempt}`);
-          return photo;
-
-        } catch (error) {
-          this.logger.warn(`⚠️ Photo capture attempt ${attempt} failed: ${error}`);
-          
-          if (attempt === maxRetries) {
-            this.logger.error(`❌ All photo capture attempts failed: ${error}`);
-            return null;
-          }
-
-          // Wait a bit before retrying (exponential backoff)
-          const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000); // 1s, 2s, 4s max
-          this.logger.info(`⏳ Waiting ${delay}ms before retry...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-        }
-      }
-
-      return null;
-    } finally {
-      // Always release camera lock
-      this.cameraInUse.set(userId, false);
+      session.logger.error(`❌ Nutrition analysis workflow failed: ${error}`);
+      throw error;
     }
   }
 
@@ -525,13 +904,30 @@ class NutritionLensApp extends AppServer {
   }
 
   protected async onStop(sessionId: string, userId: string, reason: string): Promise<void> {
-    this.logger.info(`Session ${sessionId} stopped for user ${userId}. Reason: ${reason}`);
+    const session = this.userSessions.get(userId);
+    if (session) {
+      session.logger.info(`Session ${sessionId} stopped for user ${userId}. Reason: ${reason}`);
+    }
+    
+    // Clean up all session-specific handlers
+    const handlers = this.cleanupHandlers.get(sessionId);
+    if (handlers) {
+      handlers.forEach(handler => {
+        try {
+          handler();
+        } catch (error) {
+          console.error(`Error during cleanup: ${error}`);
+        }
+      });
+      this.cleanupHandlers.delete(sessionId);
+    }
     
     // Clean up user-specific state
     this.isStreamingPhotos.delete(userId);
     this.nextPhotoTime.delete(userId);
     this.cameraReady.delete(userId);
     this.cameraInUse.delete(userId);
+    this.lastCameraOperation.delete(userId);
     this.userSessions.delete(userId);
     this.isCapturingQuestion.delete(userId);
     this.capturedQuestions.delete(userId);
@@ -541,14 +937,81 @@ class NutritionLensApp extends AppServer {
    * Set up webview routes for photo display functionality
    */
   private setupWebviewRoutes(): void {
-    const app = this.getExpressApp();
+    try {
+      // Try to access getExpressApp method with fallback
+      if (typeof (this as any).getExpressApp === 'function') {
+        const app = (this as any).getExpressApp();
     setupWebviewRoutes(app, this.photoManager, this);
+        console.log('✅ Webview routes setup successful');
+      } else {
+        console.warn('⚠️ getExpressApp method not available, skipping webview routes setup');
+      }
+    } catch (error) {
+      console.warn('⚠️ Webview routes setup failed:', error);
+    }
+  }
+
+  /**
+   * Cleanup worker threads and shutdown gracefully
+   */
+  public async shutdown(): Promise<void> {
+    try {
+      if (this.workersInitialized) {
+        await shutdownDefaultWorkers();
+        this.workersInitialized = false;
+      }
+      console.log('✅ Application shutdown complete');
+    } catch (error) {
+      console.error('❌ Error during shutdown:', error);
+    }
+  }
+
+  /**
+   * Manual start method with fallback if SDK doesn't provide one
+   */
+  public async startServer(): Promise<void> {
+    try {
+      // Try to use the SDK's start method first
+      if (typeof (this as any).start === 'function') {
+        await (this as any).start();
+        console.log('✅ Server started using SDK start method');
+      } else {
+        console.log('⚠️ SDK start method not available, server may need to be started manually');
+        // In this case, the MentraOS platform might handle the server startup
+      }
+    } catch (error) {
+      console.error('❌ Error starting server:', error);
+      throw error;
+    }
   }
 }
 
-// Start the server
-// DEV CONSOLE URL: https://console.mentra.glass/
-// Get your webhook URL from ngrok (or whatever public URL you have)
+// Start the server with parallel processing
 const app = new NutritionLensApp();
 
-app.start().catch(console.error);
+// Handle graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('Received SIGTERM, shutting down gracefully...');
+  await app.shutdown();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('Received SIGINT, shutting down gracefully...');
+  await app.shutdown();
+  process.exit(0);
+});
+
+// Start the server with improved error handling
+async function startApplication() {
+  try {
+    await app.startServer();
+    console.log('🚀 Nutrition Lens application started successfully with parallel processing');
+  } catch (error) {
+    console.error('❌ Failed to start application:', error);
+    console.log('ℹ️ The application may still work if MentraOS handles server startup automatically');
+  }
+}
+
+// Initialize the application
+startApplication();

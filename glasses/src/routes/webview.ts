@@ -15,6 +15,7 @@ import {
   upsertUser,
   parseDietaryRestrictions 
 } from '../services/supabase';
+import { convertTextToAudio, analyzeDietaryQuestionWithAudio } from '../services/claude-dietary-analysis';
 
 /**
  * Set up webview routes for photo display functionality
@@ -277,5 +278,80 @@ export function setupWebviewRoutes(app: Express, photoManager: PhotoManager, gla
     const templatePath = path.join(process.cwd(), 'views', 'photo-viewer.ejs');
     const html = await ejs.renderFile(templatePath, {});
     res.send(html);
+  });
+
+  // ✨ NEW AUDIO FEATURES ✨
+
+  // Test endpoint: Convert text to audio
+  app.post('/api/audio/text-to-speech', async (req: Request, res: Response) => {
+    try {
+      const { text, userId, voiceId } = req.body;
+
+      if (!text) {
+        res.status(400).json({ error: 'Text is required' });
+        return;
+      }
+
+      if (!userId) {
+        res.status(400).json({ error: 'UserId is required' });
+        return;
+      }
+
+      console.log(`🎤 Converting text to audio for user ${userId}`);
+      
+      const audioResult = await convertTextToAudio(text, userId, voiceId);
+      
+      res.json({
+        success: true,
+        message: 'Text converted to audio successfully',
+        data: audioResult
+      });
+
+    } catch (error) {
+      console.error('❌ Error in text-to-speech endpoint:', error);
+      res.status(500).json({ 
+        error: 'Failed to convert text to audio',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  });
+
+  // Test endpoint: Full dietary analysis with audio
+  app.post('/api/audio/dietary-analysis', async (req: Request, res: Response) => {
+    try {
+      const { question, imageUrl, username, voiceId } = req.body;
+
+      if (!question) {
+        res.status(400).json({ error: 'Question is required' });
+        return;
+      }
+
+      if (!imageUrl) {
+        res.status(400).json({ error: 'Image URL is required' });
+        return;
+      }
+
+      console.log(`🔍 Analyzing dietary question with audio for ${username || 'Nathan'}`);
+      
+      const result = await analyzeDietaryQuestionWithAudio(
+        question, 
+        imageUrl, 
+        username || 'Nathan', 
+        voiceId
+      );
+      
+      res.json({
+        success: true,
+        message: 'Dietary analysis with audio completed successfully',
+        data: result
+      });
+
+    } catch (error) {
+      console.error('❌ Error in dietary analysis with audio endpoint:', error);
+      res.status(500).json({ 
+        error: 'Failed to analyze dietary question with audio',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
   });
 } 
