@@ -1,46 +1,47 @@
-import { AppServer, AppSession, ViewType, AuthenticatedRequest, PhotoData } from '@mentra/sdk';
-import { Request, Response } from 'express';
-import * as ejs from 'ejs';
-import * as path from 'path';
-
 /**
- * Interface representing a stored photo with metadata
+ * Main entry point for the Nutrition Lens smart glasses application
+ * 
+ * This application captures photos, uploads them to UploadThing, analyzes nutrition
+ * facts using Claude Vision API, and sends results to Discord webhooks.
  */
-interface StoredPhoto {
-  requestId: string;
-  buffer: Buffer;
-  timestamp: Date;
-  userId: string;
-  mimeType: string;
-  filename: string;
-  size: number;
-}
 
-const PACKAGE_NAME = process.env.PACKAGE_NAME ?? (() => { throw new Error('PACKAGE_NAME is not set in .env file'); })();
-const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY ?? (() => { throw new Error('MENTRAOS_API_KEY is not set in .env file'); })();
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL ?? (() => { throw new Error('DISCORD_WEBHOOK_URL is not set in .env file'); })();
-const PORT = parseInt(process.env.PORT || '3000');
+import { AppServer, AppSession } from '@mentra/sdk';
+import { CONFIG } from './config/environment';
+import { PhotoManager } from './services/photo-manager';
+import { setupWebviewRoutes } from './routes/webview';
+import { elevenlabsTTS } from './services/elevenlabs.mts';
+import * as fs from 'fs';
+import * as path from 'path';
 
 /**
  * Photo Taker App with webview functionality for displaying photos
  * Extends AppServer to provide photo taking and webview display capabilities
  */
-class ExampleMentraOSApp extends AppServer {
-  private photos: Map<string, StoredPhoto> = new Map(); // Store photos by userId
-  private latestPhotoTimestamp: Map<string, number> = new Map(); // Track latest photo timestamp per user
+class NutritionLensApp extends AppServer {
+  private photoManager: PhotoManager = new PhotoManager();
   private isStreamingPhotos: Map<string, boolean> = new Map(); // Track if we are streaming photos for a user
   private nextPhotoTime: Map<string, number> = new Map(); // Track next photo time for a user
   private cameraReady: Map<string, boolean> = new Map(); // Track if camera is pre-warmed for user
+  private userSessions: Map<string, AppSession> = new Map(); // Track active sessions for TTS
 
   constructor() {
     super({
-      packageName: PACKAGE_NAME,
-      apiKey: MENTRAOS_API_KEY,
-      port: PORT,
+      packageName: CONFIG.PACKAGE_NAME,
+      apiKey: CONFIG.MENTRAOS_API_KEY,
+      port: CONFIG.PORT,
     });
+    this.setupMiddleware();
     this.setupWebviewRoutes();
   }
 
+  /**
+   * Set up Express middleware
+   */
+  private setupMiddleware(): void {
+    const app = this.getExpressApp();
+    // Add JSON body parser for TTS requests
+    app.use(require('express').json());
+  }
 
   /**
    * Handle new session creation and button press events
@@ -48,6 +49,9 @@ class ExampleMentraOSApp extends AppServer {
   protected async onSession(session: AppSession, sessionId: string, userId: string): Promise<void> {
     // this gets called whenever a user launches the app
     this.logger.info(`Session started for user ${userId}`);
+
+    // Store the session for TTS functionality
+    this.userSessions.set(userId, session);
 
     // set the initial state of the user
     this.isStreamingPhotos.set(userId, false);
@@ -84,8 +88,8 @@ class ExampleMentraOSApp extends AppServer {
           // set the next photo time to now, since we are ready to take another photo
           this.nextPhotoTime.set(userId, Date.now());
 
-          // cache the photo for display
-          this.cachePhoto(photo, userId);
+          // cache the photo for display and process it
+          await this.photoManager.cacheAndProcessPhoto(photo, userId, this.logger);
         } catch (error) {
           this.logger.error(`Error auto-taking photo: ${error}`);
         }
@@ -128,11 +132,75 @@ class ExampleMentraOSApp extends AppServer {
   private takePhotoImmediate(session: AppSession, userId: string): void {
     session.camera.requestPhoto()
       .then(photo => {
-        this.cachePhoto(photo, userId);
+        this.photoManager.cacheAndProcessPhoto(photo, userId, this.logger);
       })
       .catch(error => {
         this.logger.error(`Error taking photo: ${error}`);
       });
+  }
+
+  /**
+   * Play TTS audio on the glasses for a specific user
+   */
+  public async playTTSForUser(userId: string, text: string): Promise<void> {
+    const session = this.userSessions.get(userId);
+    if (!session) {
+      this.logger.error(`No active session found for user ${userId}`);
+      throw new Error('No active session found');
+    }
+
+    try {
+      this.logger.info(`Generating TTS for user ${userId}: "${text}"`);
+      
+      // Generate TTS audio buffer
+      const audioBuffer = await elevenlabsTTS.textToSpeech(text);
+      
+      // Create temporary audio file
+      const tempDir = '/tmp';
+      const tempFileName = `tts_${userId}_${Date.now()}.mp3`;
+      const tempFilePath = path.join(tempDir, tempFileName);
+      
+      // Write audio buffer to temporary file
+      fs.writeFileSync(tempFilePath, audioBuffer);
+      
+      // Play audio on the glasses using the file URL
+      if (session.audio && typeof session.audio.playAudio === 'function') {
+        await session.audio.playAudio({
+          audioUrl: tempFilePath
+        });
+        this.logger.info(`TTS audio played successfully for user ${userId}`);
+        
+        // Clean up temporary file after a delay
+        setTimeout(() => {
+          try {
+            fs.unlinkSync(tempFilePath);
+          } catch (error) {
+            this.logger.warn(`Failed to cleanup temporary audio file: ${error}`);
+          }
+        }, 10000); // Clean up after 10 seconds
+        
+      } else {
+        this.logger.warn(`Audio playback not supported for user ${userId}`);
+        // Clean up temporary file
+        try {
+          fs.unlinkSync(tempFilePath);
+        } catch (error) {
+          this.logger.warn(`Failed to cleanup temporary audio file: ${error}`);
+        }
+        throw new Error('Audio playback not supported on this device');
+      }
+      
+    } catch (error) {
+      this.logger.error(`Error playing TTS for user ${userId}: ${error}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get active session for a user (for external access)
+   */
+  public getSessionForUser(userId: string): AppSession | undefined {
+    return this.userSessions.get(userId);
   }
 
   protected async onStop(sessionId: string, userId: string, reason: string): Promise<void> {
@@ -140,162 +208,22 @@ class ExampleMentraOSApp extends AppServer {
     this.isStreamingPhotos.set(userId, false);
     this.nextPhotoTime.delete(userId);
     this.cameraReady.delete(userId);
+    this.userSessions.delete(userId); // Clean up session reference
     this.logger.info(`Session stopped for user ${userId}, reason: ${reason}`);
   }
 
   /**
-   * Cache a photo for display and send to Discord webhook
+   * Set up webview routes for photo display functionality
    */
-  private async cachePhoto(photo: PhotoData, userId: string) {
-    // create a new stored photo object which includes the photo data and the user id
-    const cachedPhoto: StoredPhoto = {
-      requestId: photo.requestId,
-      buffer: photo.buffer,
-      timestamp: photo.timestamp,
-      userId: userId,
-      mimeType: photo.mimeType,
-      filename: photo.filename,
-      size: photo.size
-    };
-
-    // cache the photo for display immediately
-    this.photos.set(userId, cachedPhoto);
-    // update the latest photo timestamp
-    this.latestPhotoTimestamp.set(userId, cachedPhoto.timestamp.getTime());
-
-    // Send the photo to Discord webhook asynchronously (non-blocking)
-    this.sendToDiscord(cachedPhoto).catch(error => {
-      this.logger.error(`Error sending photo to Discord: ${error}`);
-    });
-  }
-
-  /**
-   * Send photo to Discord webhook
-   */
-  private async sendToDiscord(photo: StoredPhoto) {
-    try {
-      // Create FormData for Discord webhook
-      const formData = new FormData();
-      
-      // Create a Blob from the buffer
-      const blob = new Blob([photo.buffer], { type: photo.mimeType });
-      
-      // Add the image file to the form data
-      formData.append('file', blob, photo.filename);
-      
-      // Add a message with photo metadata
-      const message = {
-        content: `📸 New photo from user ${photo.userId}`,
-        embeds: [{
-          title: "Photo Details",
-          fields: [
-            { name: "Timestamp", value: photo.timestamp.toISOString(), inline: true },
-            { name: "File Size", value: `${(photo.size / 1024).toFixed(2)} KB`, inline: true },
-            { name: "MIME Type", value: photo.mimeType, inline: true }
-          ],
-          timestamp: photo.timestamp.toISOString(),
-          color: 0x00ff00
-        }]
-      };
-      
-      formData.append('payload_json', JSON.stringify(message));
-
-      // Send to Discord webhook
-      const response = await fetch(DISCORD_WEBHOOK_URL, {
-        method: 'POST',
-        body: formData
-      });
-
-      if (response.ok) {
-        this.logger.info(`Photo sent to Discord successfully for user ${photo.userId}`);
-      } else {
-        this.logger.error(`Failed to send photo to Discord: ${response.status} ${response.statusText}`);
-      }
-    } catch (error) {
-      this.logger.error(`Error sending photo to Discord: ${error}`);
-    }
-  }
-
-
-  /**
- * Set up webview routes for photo display functionality
- */
   private setupWebviewRoutes(): void {
     const app = this.getExpressApp();
-
-    // API endpoint to get the latest photo for the authenticated user
-    app.get('/api/latest-photo', (req: any, res: any) => {
-      const userId = (req as AuthenticatedRequest).authUserId;
-
-      if (!userId) {
-        res.status(401).json({ error: 'Not authenticated' });
-        return;
-      }
-
-      const photo = this.photos.get(userId);
-      if (!photo) {
-        res.status(404).json({ error: 'No photo available' });
-        return;
-      }
-
-      res.json({
-        requestId: photo.requestId,
-        timestamp: photo.timestamp.getTime(),
-        hasPhoto: true
-      });
-    });
-
-    // API endpoint to get photo data
-    app.get('/api/photo/:requestId', (req: any, res: any) => {
-      const userId = (req as AuthenticatedRequest).authUserId;
-      const requestId = req.params.requestId;
-
-      if (!userId) {
-        res.status(401).json({ error: 'Not authenticated' });
-        return;
-      }
-
-      const photo = this.photos.get(userId);
-      if (!photo || photo.requestId !== requestId) {
-        res.status(404).json({ error: 'Photo not found' });
-        return;
-      }
-
-      res.set({
-        'Content-Type': photo.mimeType,
-        'Cache-Control': 'no-cache'
-      });
-      res.send(photo.buffer);
-    });
-
-    // Main webview route - displays the photo viewer interface
-    app.get('/webview', async (req: any, res: any) => {
-      const userId = (req as AuthenticatedRequest).authUserId;
-
-      if (!userId) {
-        res.status(401).send(`
-          <html>
-            <head><title>Photo Viewer - Not Authenticated</title></head>
-            <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
-              <h1>Please open this page from the MentraOS app</h1>
-            </body>
-          </html>
-        `);
-        return;
-      }
-
-      const templatePath = path.join(process.cwd(), 'views', 'photo-viewer.ejs');
-      const html = await ejs.renderFile(templatePath, {});
-      res.send(html);
-    });
+    setupWebviewRoutes(app, this.photoManager, this);
   }
 }
-
-
 
 // Start the server
 // DEV CONSOLE URL: https://console.mentra.glass/
 // Get your webhook URL from ngrok (or whatever public URL you have)
-const app = new ExampleMentraOSApp();
+const app = new NutritionLensApp();
 
 app.start().catch(console.error);

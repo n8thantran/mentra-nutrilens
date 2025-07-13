@@ -10,6 +10,7 @@
       padding: 0;
       background-color: #000;
       display: flex;
+      flex-direction: column;
       justify-content: center;
       align-items: center;
       min-height: 100vh;
@@ -18,10 +19,11 @@
 
     .photo-container {
       max-width: 100vw;
-      max-height: 100vh;
+      max-height: 85vh;
       display: flex;
       justify-content: center;
       align-items: center;
+      flex-grow: 1;
     }
 
     .photo {
@@ -42,11 +44,57 @@
       text-align: center;
       font-size: 16px;
     }
+
+    .controls {
+      padding: 20px;
+      text-align: center;
+    }
+
+    .tts-button {
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      font-size: 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background-color 0.3s;
+    }
+
+    .tts-button:hover {
+      background-color: #45a049;
+    }
+
+    .tts-button:disabled {
+      background-color: #666;
+      cursor: not-allowed;
+    }
+
+    .status-message {
+      color: white;
+      margin-top: 10px;
+      font-size: 14px;
+    }
+
+    .error {
+      color: #ff6b6b;
+    }
+
+    .success {
+      color: #51cf66;
+    }
   </style>
 </head>
 <body>
   <div class="photo-container">
     <div id="content" class="loading">Loading latest photo...</div>
+  </div>
+
+  <div class="controls">
+    <button id="ttsButton" class="tts-button" onclick="playTTS()">
+      🔊 Play TTS Instructions
+    </button>
+    <div id="statusMessage" class="status-message"></div>
   </div>
 
   <script>
@@ -84,6 +132,55 @@
         console.error('Error checking for new photo:', error);
         document.getElementById('content').innerHTML =
           '<div class="no-photo">Error loading photo. Please refresh the page.</div>';
+      }
+    }
+
+    /**
+     * Play TTS message on the glasses
+     */
+    async function playTTS() {
+      const button = document.getElementById('ttsButton');
+      const statusMessage = document.getElementById('statusMessage');
+      
+      // Disable button and show loading
+      button.disabled = true;
+      button.textContent = '🔊 Playing...';
+      statusMessage.textContent = 'Sending TTS to glasses...';
+      statusMessage.className = 'status-message';
+
+      try {
+        const response = await fetch('/api/tts', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            text: 'Hold the image still for 5 seconds'
+          })
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+          statusMessage.textContent = 'TTS played successfully on glasses!';
+          statusMessage.className = 'status-message success';
+        } else {
+          statusMessage.textContent = `Error: ${result.message || result.error}`;
+          statusMessage.className = 'status-message error';
+        }
+      } catch (error) {
+        console.error('Error playing TTS:', error);
+        statusMessage.textContent = 'Failed to play TTS. Please try again.';
+        statusMessage.className = 'status-message error';
+      } finally {
+        // Re-enable button
+        button.disabled = false;
+        button.textContent = '🔊 Play TTS Instructions';
+        
+        // Clear status message after 3 seconds
+        setTimeout(() => {
+          statusMessage.textContent = '';
+        }, 3000);
       }
     }
 
