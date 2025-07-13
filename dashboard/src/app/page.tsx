@@ -1,103 +1,156 @@
-import Image from "next/image";
+import Link from 'next/link'
 
-export default function Home() {
+export default function LandingPage() {
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm/6 text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-[family-name:var(--font-geist-mono)] font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+    <div className="min-h-screen bg-black">
+      {/* Header */}
+      <header className="border-b border-gray-800">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-4">
+              <div className="text-2xl font-bold text-white">NutriLens</div>
+              <div className="text-sm text-gray-400">Powered by MentraOS</div>
+            </div>
+            <Link 
+              href="/dashboard"
+              className="bg-[#35c07d] text-white px-4 py-2 rounded-lg hover:bg-[#2da068] transition-colors"
+            >
+              Open Dashboard
+            </Link>
+          </div>
+        </div>
+      </header>
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+      {/* Hero Section */}
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="py-20 text-center">
+          <div className="mb-8">
+            <div className="text-8xl mb-6">🔍</div>
+            <h1 className="text-6xl font-bold text-white mb-4">
+              Nutri<span className="text-[#35c07d]">Lens</span>
+            </h1>
+            <p className="text-xl text-gray-300 max-w-2xl mx-auto">
+              Advanced nutrition tracking powered by AI. Analyze your meals, track your progress, and optimize your health with intelligent insights.
+            </p>
+          </div>
+
+          <div className="mb-12">
+            <Link 
+              href="/dashboard"
+              className="bg-[#35c07d] text-white px-8 py-4 rounded-lg text-lg font-medium hover:bg-[#2da068] transition-colors inline-block"
+            >
+              Start Tracking →
+            </Link>
+          </div>
+        </div>
+
+        {/* Features Grid */}
+        <div className="pb-20">
+          <div className="grid md:grid-cols-3 gap-8">
+            {/* Feature 1 */}
+            <div className="text-center p-6 rounded-lg border border-gray-800 bg-gray-900">
+              <div className="text-4xl mb-4">📊</div>
+              <h3 className="text-xl font-bold text-white mb-2">Smart Analytics</h3>
+              <p className="text-gray-300">
+                Comprehensive nutrition analysis with detailed breakdowns of macros, vitamins, and minerals.
+              </p>
+            </div>
+
+            {/* Feature 2 */}
+            <div className="text-center p-6 rounded-lg border border-gray-800 bg-gray-900">
+              <div className="text-4xl mb-4">📸</div>
+              <h3 className="text-xl font-bold text-white mb-2">Visual Tracking</h3>
+              <p className="text-gray-300">
+                Capture and analyze your meals with our intelligent image recognition system.
+              </p>
+            </div>
+
+            {/* Feature 3 */}
+            <div className="text-center p-6 rounded-lg border border-gray-800 bg-gray-900">
+              <div className="text-4xl mb-4">🎯</div>
+              <h3 className="text-xl font-bold text-white mb-2">Goal Tracking</h3>
+              <p className="text-gray-300">
+                Set and monitor your daily calorie goals with real-time progress tracking.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Stats Section */}
+        <div className="pb-20">
+          <div className="bg-gray-900 rounded-lg p-12 text-center border border-gray-800">
+            <h2 className="text-3xl font-bold text-white mb-8">Your Nutrition Journey</h2>
+            <div className="grid md:grid-cols-3 gap-8">
+              <div>
+                <div className="text-4xl font-bold text-[#35c07d] mb-2">2,400</div>
+                <div className="text-gray-300">Daily Calorie Target</div>
+              </div>
+              <div>
+                <div className="text-4xl font-bold text-[#35c07d] mb-2">24/7</div>
+                <div className="text-gray-300">Continuous Monitoring</div>
+              </div>
+              <div>
+                <div className="text-4xl font-bold text-[#35c07d] mb-2">100%</div>
+                <div className="text-gray-300">Accurate Analysis</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* How It Works */}
+        <div className="pb-20">
+          <div className="text-center mb-12">
+            <h2 className="text-3xl font-bold text-white mb-4">How It Works</h2>
+            <p className="text-gray-300 max-w-2xl mx-auto">
+              Get started with NutriLens in three simple steps
+            </p>
+          </div>
+
+          <div className="grid md:grid-cols-3 gap-8">
+            <div className="text-center">
+              <div className="w-16 h-16 bg-[#35c07d] text-white rounded-full flex items-center justify-center text-xl font-bold mx-auto mb-4">
+                1
+              </div>
+              <h3 className="text-xl font-bold text-white mb-2">Capture</h3>
+              <p className="text-gray-300">
+                Take a photo of your meal or manually log your food intake
+              </p>
+            </div>
+
+            <div className="text-center">
+              <div className="w-16 h-16 bg-[#35c07d] text-white rounded-full flex items-center justify-center text-xl font-bold mx-auto mb-4">
+                2
+              </div>
+              <h3 className="text-xl font-bold text-white mb-2">Analyze</h3>
+              <p className="text-gray-300">
+                Our AI processes your meal and extracts detailed nutrition information
+              </p>
+            </div>
+
+            <div className="text-center">
+              <div className="w-16 h-16 bg-[#35c07d] text-white rounded-full flex items-center justify-center text-xl font-bold mx-auto mb-4">
+                3
+              </div>
+              <h3 className="text-xl font-bold text-white mb-2">Track</h3>
+              <p className="text-gray-300">
+                Monitor your progress and optimize your nutrition goals
+              </p>
+            </div>
+          </div>
         </div>
       </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
+
+      {/* Footer */}
+      <footer className="border-t border-gray-800 bg-gray-900">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          <div className="text-center">
+            <div className="text-lg font-bold text-white mb-2">NutriLens</div>
+            <p className="text-gray-400 text-sm">
+              Powered by MentraOS • Advanced Nutrition Intelligence
+            </p>
+          </div>
+        </div>
       </footer>
     </div>
-  );
+  )
 }
