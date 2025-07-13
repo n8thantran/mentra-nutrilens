@@ -94,6 +94,9 @@
     <button id="ttsButton" class="tts-button" onclick="playTTS()">
       🔊 Play TTS Instructions
     </button>
+    <button id="uploadTestButton" class="tts-button" onclick="testUpload()" style="margin-left: 10px; background-color: #2196F3;">
+      📤 Test TTS + Upload
+    </button>
     <div id="statusMessage" class="status-message"></div>
   </div>
 
@@ -181,6 +184,52 @@
         setTimeout(() => {
           statusMessage.textContent = '';
         }, 3000);
+      }
+    }
+
+    /**
+     * Test TTS generation and upload to UploadThing
+     */
+    async function testUpload() {
+      const button = document.getElementById('uploadTestButton');
+      const statusMessage = document.getElementById('statusMessage');
+      
+      // Disable button and show loading
+      button.disabled = true;
+      button.textContent = '📤 Uploading...';
+      statusMessage.textContent = 'Generating TTS and uploading to UploadThing...';
+      statusMessage.className = 'status-message';
+
+      try {
+        const response = await fetch('/api/tts/test-upload', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          }
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+          statusMessage.textContent = 'TTS generated and uploaded to UploadThing successfully!';
+          statusMessage.className = 'status-message success';
+        } else {
+          statusMessage.textContent = `Error: ${result.message || result.error}`;
+          statusMessage.className = 'status-message error';
+        }
+      } catch (error) {
+        console.error('Error testing upload:', error);
+        statusMessage.textContent = 'Failed to generate and upload TTS. Please try again.';
+        statusMessage.className = 'status-message error';
+      } finally {
+        // Re-enable button
+        button.disabled = false;
+        button.textContent = '📤 Test TTS + Upload';
+        
+        // Clear status message after 5 seconds (longer for upload success)
+        setTimeout(() => {
+          statusMessage.textContent = '';
+        }, 5000);
       }
     }
 

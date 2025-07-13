@@ -8,6 +8,13 @@ import * as path from 'path';
 import { AuthenticatedRequest } from '@mentra/sdk';
 import { uploadthingHandlers } from '../services/uploadthing';
 import { PhotoManager } from '../services/photo-manager';
+import { 
+  createNathanUser, 
+  initializeExampleUsers, 
+  getAllUsers, 
+  upsertUser,
+  parseDietaryRestrictions 
+} from '../services/supabase';
 
 /**
  * Set up webview routes for photo display functionality
@@ -44,6 +51,37 @@ export function setupWebviewRoutes(app: Express, photoManager: PhotoManager, gla
       console.error('Error playing TTS:', error);
       res.status(500).json({ 
         error: 'Failed to play TTS', 
+        message: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    }
+  });
+
+  // API endpoint to test hardcoded TTS and upload to UploadThing
+  app.post('/api/tts/test-upload', async (req: any, res: any) => {
+    const userId = (req as AuthenticatedRequest).authUserId;
+
+    if (!userId) {
+      res.status(401).json({ error: 'Not authenticated' });
+      return;
+    }
+
+    if (!glassesApp) {
+      res.status(500).json({ error: 'Glasses app not available' });
+      return;
+    }
+
+    try {
+      const hardcodedText = "Hold the image still for 5 seconds";
+      await glassesApp.playTTSForUser(userId, hardcodedText);
+      res.json({ 
+        success: true, 
+        message: 'Hardcoded TTS generated and uploaded to UploadThing successfully',
+        text: hardcodedText
+      });
+    } catch (error) {
+      console.error('Error generating and uploading hardcoded TTS:', error);
+      res.status(500).json({ 
+        error: 'Failed to generate and upload TTS', 
         message: error instanceof Error ? error.message : 'Unknown error' 
       });
     }
@@ -92,6 +130,132 @@ export function setupWebviewRoutes(app: Express, photoManager: PhotoManager, gla
       'Cache-Control': 'no-cache'
     });
     res.send(photo.buffer);
+  });
+
+  // API endpoints for user management and database utilities
+  
+  // Create Nathan user with default dietary restrictions
+  app.post('/api/users/create-nathan', async (req: any, res: any) => {
+    try {
+      console.log('🆕 API request to create Nathan user...');
+      const user = await createNathanUser();
+      
+      if (user) {
+        res.json({ 
+          success: true, 
+          message: 'Nathan user created/updated successfully',
+          user: {
+            ...user,
+            parsedRestrictions: parseDietaryRestrictions(user.diet_restrictions)
+          }
+        });
+      } else {
+        res.status(500).json({ 
+          success: false, 
+          error: 'Failed to create Nathan user' 
+        });
+      }
+    } catch (error) {
+      console.error('❌ Error creating Nathan user:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: 'Failed to create Nathan user', 
+        message: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    }
+  });
+
+  // Initialize example users
+  app.post('/api/users/init-examples', async (req: any, res: any) => {
+    try {
+      console.log('🚀 API request to initialize example users...');
+      const users = await initializeExampleUsers();
+      
+      res.json({ 
+        success: true, 
+        message: `Initialized ${users.length} example users successfully`,
+        users: (users as any[]).map((user: any) => ({
+          ...user,
+          parsedRestrictions: parseDietaryRestrictions(user.diet_restrictions)
+        }))
+      });
+    } catch (error) {
+      console.error('❌ Error initializing example users:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: 'Failed to initialize example users', 
+        message: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    }
+  });
+
+  // Get all users
+  app.get('/api/users', async (req: any, res: any) => {
+    try {
+      console.log('👥 API request to get all users...');
+      const users = await getAllUsers();
+      
+      res.json({ 
+        success: true, 
+        users: (users as any[]).map((user: any) => ({
+          ...user,
+          parsedRestrictions: parseDietaryRestrictions(user.diet_restrictions)
+        }))
+      });
+    } catch (error) {
+      console.error('❌ Error fetching users:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: 'Failed to fetch users', 
+        message: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    }
+  });
+
+  // Create or update a user
+  app.post('/api/users', async (req: any, res: any) => {
+    try {
+      const { username, diet_preference, restrictions } = req.body;
+      
+      if (!username) {
+        res.status(400).json({ 
+          success: false, 
+          error: 'Username is required' 
+        });
+        return;
+      }
+
+      console.log(`🔄 API request to upsert user: ${username}`);
+      const user = await upsertUser(username, { diet_preference, restrictions });
+      
+      if (user) {
+        res.json({ 
+          success: true, 
+          message: `User ${username} created/updated successfully`,
+          user: {
+            id: user.id,
+            username: user.username,
+            diet_preference: user.diet_preference,
+            diet_restrictions: user.diet_restrictions,
+            created_at: user.created_at,
+            updated_at: user.updated_at,
+            parsedRestrictions: parseDietaryRestrictions(user.diet_restrictions)
+          }
+        });
+      } else {
+        res.status(500).json({ 
+          success: false, 
+          error: `Failed to create/update user ${username}` 
+        });
+      }
+    } catch (error) {
+      console.error('❌ Error creating/updating user:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: 'Failed to create/update user', 
+        message: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    }
   });
 
   // Main webview route - displays the photo viewer interface

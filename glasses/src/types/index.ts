@@ -44,4 +44,32 @@ export interface StoredPhoto {
   mimeType: string;
   filename: string;
   size: number;
+}
+
+/**
+ * Interface representing a user's dietary profile from the users table
+ */
+export interface UserDietaryProfile {
+  id: number;
+  username: string;
+  diet_preference?: string;
+  diet_restrictions?: string; // JSON string in format: {"restrictions": "red meat, dairy, etc"}
+  created_at?: string;
+  updated_at?: string;
+}
+
+/**
+ * Interface for parsed dietary restrictions JSON
+ */
+export interface DietaryRestrictions {
+  restrictions: string; // e.g., "red meat", "dairy", "none", "gluten, nuts"
+}
+
+/**
+ * Utility type for creating user profiles
+ */
+export interface UserProfileInput {
+  username: string;
+  diet_preference?: 'balanced' | 'vegetarian' | 'vegan' | 'keto' | 'paleo' | 'mediterranean' | 'low-carb' | 'low-fat';
+  restrictions?: string; // Raw restrictions string that will be wrapped in JSON
 } 

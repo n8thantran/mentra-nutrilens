@@ -9,9 +9,20 @@ import { analyzeNutritionFacts } from './nutrition-analysis';
 import { sendToDiscord } from './discord';
 import { insertNutritionData } from './supabase';
 
+// Audio playback callback type
+type AudioPlaybackCallback = (userId: string, audioUrl: string) => Promise<void>;
+
 export class PhotoManager {
   private photos: Map<string, StoredPhoto> = new Map(); // Store photos by userId
   private latestPhotoTimestamp: Map<string, number> = new Map(); // Track latest photo timestamp per user
+  private audioPlaybackCallback?: AudioPlaybackCallback; // Callback for audio playback
+
+  /**
+   * Set the audio playback callback
+   */
+  setAudioPlaybackCallback(callback: AudioPlaybackCallback): void {
+    this.audioPlaybackCallback = callback;
+  }
 
   /**
    * Cache a photo for display and process it (upload, analyze, send to Discord)
@@ -45,6 +56,17 @@ export class PhotoManager {
   private async processPhoto(photo: StoredPhoto, logger: any): Promise<void> {
     try {
       logger.info(`Uploading photo to UploadThing for user ${photo.userId}`);
+      
+      // 🎵 Play audio after photo request is sent/logged
+      if (this.audioPlaybackCallback) {
+        try {
+          const audioUrl = 'https://p70oi85l49.ufs.sh/f/nh2RhlWG3N8JdhLgZNdJUzAnxuO94lXyfcDtQHhpJgCwiVWK';
+          await this.audioPlaybackCallback(photo.userId, audioUrl);
+          logger.info(`Audio played for user ${photo.userId} after photo request`);
+        } catch (audioError) {
+          logger.error(`Failed to play audio for user ${photo.userId}: ${audioError}`);
+        }
+      }
       
       // Upload to UploadThing (nutrilens bucket)
       const uploadedFile = await uploadPhotoToUploadThing(
@@ -83,21 +105,21 @@ export class PhotoManager {
   }
 
   /**
-   * Get cached photo for a user
+   * Get a cached photo for the given user
    */
   getPhoto(userId: string): StoredPhoto | undefined {
     return this.photos.get(userId);
   }
 
   /**
-   * Get latest photo timestamp for a user
+   * Get the timestamp of the latest photo for a user
    */
   getLatestPhotoTimestamp(userId: string): number | undefined {
     return this.latestPhotoTimestamp.get(userId);
   }
 
   /**
-   * Check if photo exists for a user
+   * Check if user has a cached photo
    */
   hasPhoto(userId: string): boolean {
     return this.photos.has(userId);
